@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domo Oyunu</title>
+<style>
+  html, body { margin:0; height:100%; background:#000; overflow:hidden; }
+  body { display:flex; align-items:center; justify-content:center; }
+  #sahne {
+    position:relative;
+    width:min(100vw, 177.78vh);
+    height:min(56.25vw, 100vh);
+    background:#000;
+    user-select:none; -webkit-user-select:none;
+  }
+  .ekran { position:absolute; inset:0; background-size:100% 100%; background-repeat:no-repeat; }
+  .ekran[hidden] { display:none; }
+  canvas, video { position:absolute; inset:0; width:100%; height:100%; display:block; object-fit:fill; }
+
+  /* Şeffaf butonlar */
+  .btn {
+    position:absolute; background:transparent; border:none; padding:0;
+    cursor:pointer; -webkit-tap-highlight-color:transparent;
+  }
+  .debug .btn { outline:3px dashed red; background:rgba(255,0,0,.15); }
+
+  /* Giriş ekranı: START */
+  #baslat { left:42.6%; top:57%; width:14.4%; height:10.8%; }
+
+  /* Karakter seçme ekranı */
+  #osmanSec  { left:23.4%; top:49.3%; width:20.8%; height:32%; }
+  #renginSec { left:60.2%; top:49.3%; width:21%;   height:32%; }
+
+  /* Oyun bitti ekranı */
+  #tekrarOyna  { left:41.7%; top:45.8%; width:16.7%; height:12.7%; }
+  #karakterSec { left:42.1%; top:68.3%; width:16.8%; height:12.8%; }
+
+  #hud {
+    position:absolute; left:2%; top:3%; right:2%;
+    display:flex; justify-content:space-between; align-items:center;
+    font:bold 3.2vmin "Courier New", monospace; color:#2d2a6e;
+    text-shadow:2px 2px 0 #fff; pointer-events:none;
+  }
+  #canlar { font-size:4vmin; letter-spacing:.5vmin; color:#e0245e; }
+  #sonPuan {
+    position:absolute; left:0; right:0; top:35%; text-align:center;
+    font:bold 4vmin "Courier New", monospace; color:#2f5d1f; text-shadow:2px 2px 0 #fff;
+  }
+</style>
+</head>
+<body>
+<div id="sahne">
+
+  <!-- GİRİŞ (video) -->
+  <section id="giris" class="ekran" style="background:#bfe6ee">
+    <video id="girisVideo" src="deneme.mp4" autoplay loop muted playsinline></video>
+    <button id="baslat" class="btn" aria-label="Start"></button>
+  </section>
+
+  <!-- KARAKTER SEÇ -->
+  <section id="secim" class="ekran" hidden style="background-image:url('secimekrn.png')">
+    <button id="osmanSec" class="btn" aria-label="Osman"></button>
+    <button id="renginSec" class="btn" aria-label="Rengin"></button>
+  </section>
+
+  <!-- OYUN -->
+  <section id="oyun" class="ekran" hidden>
+    <canvas id="tuval" width="1280" height="720"></canvas>
+    <div id="hud"><span id="isimPuan"></span><span id="canlar"></span></div>
+  </section>
+
+  <!-- OYUN BİTTİ -->
+  <section id="sonuc" class="ekran" hidden style="background-image:url('bitti.png')">
+    <div id="sonPuan"></div>
+    <button id="tekrarOyna" class="btn" aria-label="Tekrar oyna"></button>
+    <button id="karakterSec" class="btn" aria-label="Karakter seç"></button>
+  </section>
+</div>
+
+<script>
+const DEBUG = false; // true yaparsan şeffaf butonların yeri kırmızı görünür
+if (DEBUG) document.getElementById("sahne").classList.add("debug");
+
+const W = 1280, H = 720, ZEMIN = 645;
+const tuval = document.getElementById("tuval");
+const ctx = tuval.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+const ekranlar = {
+  giris: document.getElementById("giris"),
+  secim: document.getElementById("secim"),
+  oyun: document.getElementById("oyun"),
+  sonuc: document.getElementById("sonuc")
+};
+const girisVideo = document.getElementById("girisVideo");
+const canlarEl = document.getElementById("canlar");
+const isimPuanEl = document.getElementById("isimPuan");
+const sonPuanEl = document.getElementById("sonPuan");
+
+function gorsel(src) { const i = new Image(); i.src = src; return i; }
+const arkaplan = gorsel("arkaplan.png");
+const engelImg = gorsel("engel.png");
+const karakterler = {
+  Osman:  gorsel("kahramanlar/osman.png"),
+  Rengin: gorsel("kahramanlar/rengin.png")
+};
+
+// Uçan karakter görsellerindeki boş kenarları kırp
+const KIRP = { x: 0.01, y: 0.12, w: 0.98, h: 0.76 };
+
+let secili = "Osman", oyuncu, engeller, puan, can, durum = "giris";
+let sonEngelZamani = 0, dokunulmaz = 0, anim = null, sonZaman = 0;
+
+// Zorluk ayarları (buradan oynayabilirsin)
+const GAP = 230, ENGEL_GENISLIK = 120, HIZ = 4, YER_CEKIMI = 0.5, ZIPLAMA = -9;
+
+function ekranGoster(ad) {
+  for (const k in ekranlar) ekranlar[k].hidden = (k !== ad);
+  if (ad === "giris") { girisVideo.currentTime = 0; girisVideo.play().catch(() => {}); }
+  else girisVideo.pause();
+}
+
+function canYaz() { canlarEl.textContent = "❤".repeat(can) + "♡".repeat(3 - can); }
+
+function basla(isim) {
+  secili = isim;
+  const img = karakterler[isim];
+  const oran = img.naturalWidth
+    ? (img.naturalWidth * KIRP.w) / (img.naturalHeight * KIRP.h)
+    : 2.6;
+  const gen = 140;
+  oyuncu = { x: 220, y: 280, w: gen, h: gen / oran, vy: 0 };
+  engeller = []; puan = 0; can = 3; dokunulmaz = 0; sonEngelZamani = 1500;
+  isimPuanEl.textContent = isim + " | Puan: 0";
+  canYaz();
+  ekranGoster("oyun");
+  durum = "oyun";
+  sonZaman = performance.now();
+  cancelAnimationFrame(anim);
+  anim = requestAnimationFrame(dongu);
+}
+
+function ziplat() { if (durum === "oyun") oyuncu.vy = ZIPLAMA; }
+
+function engelEkle() {
+  const alanUst = 40, alanAlt = ZEMIN - 40;
+  const gapY = alanUst + GAP / 2 + Math.random() * (alanAlt - alanUst - GAP);
+  engeller.push({ x: W + 20, gapY, gecildi: false, vurdu: false });
+}
+
+function canKaybet() {
+  if (dokunulmaz > 0) return;
+  can--;
+  canYaz();
+  dokunulmaz = 1500;
+  if (can <= 0) bitir();
+}
+
+function bitir() {
+  durum = "sonuc";
+  cancelAnimationFrame(anim);
+  sonPuanEl.textContent = "Puan: " + puan;
+  ekranGoster("sonuc");
+}
+
+function guncelle(dt) {
+  const k = dt / 16.667;
+  oyuncu.vy += YER_CEKIMI * k;
+  oyuncu.y += oyuncu.vy * k;
+  if (dokunulmaz > 0) dokunulmaz -= dt;
+
+  if (oyuncu.y < 0) { oyuncu.y = 0; oyuncu.vy = 0; }
+  if (oyuncu.y + oyuncu.h > ZEMIN) {
+    oyuncu.y = ZEMIN - oyuncu.h;
+    oyuncu.vy = ZIPLAMA * 0.8;
+    canKaybet();
+  }
+
+  sonEngelZamani += dt;
+  if (sonEngelZamani > 1700) { sonEngelZamani = 0; engelEkle(); }
+
+  // çarpışma kutusu (karakterden biraz küçük)
+  const px = oyuncu.x + oyuncu.w * 0.12, py = oyuncu.y + oyuncu.h * 0.15;
+  const pw = oyuncu.w * 0.76, ph = oyuncu.h * 0.7;
+
+  for (const e of engeller) {
+    e.x -= HIZ * k;
+    const ex = e.x + 12, ew = ENGEL_GENISLIK - 24;
+    const ustBitis = e.gapY - GAP / 2, altBaslangic = e.gapY + GAP / 2;
+
+    if (!e.vurdu && px < ex + ew && px + pw > ex &&
+        (py < ustBitis || py + ph > altBaslangic)) {
+      e.vurdu = true;
+      canKaybet();
+    }
+    if (!e.gecildi && e.x + ENGEL_GENISLIK < oyuncu.x) {
+      e.gecildi = true;
+      if (!e.vurdu) { puan++; isimPuanEl.textContent = secili + " | Puan: " + puan; }
+    }
+  }
+  engeller = engeller.filter(e => e.x > -ENGEL_GENISLIK - 20);
+}
+
+// Bina: üstte çatı, altı kat kat tekrar eder (görüntü sünmez)
+function bina(x, y, h) {
+  const iw = engelImg.naturalWidth, ih = engelImg.naturalHeight;
+  const sx = iw * 0.28, sw = iw * 0.44;
+  const olcek = ENGEL_GENISLIK / sw;
+  const capSy = ih * 0.02,  capSh = ih * 0.096;
+  const katSy = ih * 0.204, katSh = ih * 0.0895;
+  const capH = capSh * olcek, katH = katSh * olcek;
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x, y, ENGEL_GENISLIK, h); ctx.clip();
+  ctx.drawImage(engelImg, sx, capSy, sw, capSh, x, y, ENGEL_GENISLIK, Math.ceil(capH));
+  for (let yy = y + capH; yy < y + h; yy += katH) {
+    ctx.drawImage(engelImg, sx, katSy, sw, katSh, x, Math.round(yy), ENGEL_GENISLIK, Math.ceil(katH) + 1);
+  }
+  ctx.restore();
+}
+
+function engelCiz(e) {
+  const x = Math.round(e.x);
+  const ustBitis = e.gapY - GAP / 2, altBaslangic = e.gapY + GAP / 2;
+  // alt bina
+  bina(x, Math.round(altBaslangic), ZEMIN - altBaslangic + 10);
+  // üst bina (ters çevrilmiş)
+  ctx.save();
+  ctx.translate(0, ustBitis);
+  ctx.scale(1, -1);
+  bina(x, 0, ustBitis + 10);
+  ctx.restore();
+}
+
+function ciz() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(arkaplan, 0, 0, W, H);
+  engeller.forEach(engelCiz);
+
+  // zemini binaların üstüne tekrar çiz
+  const aw = arkaplan.naturalWidth, ah = arkaplan.naturalHeight;
+  ctx.drawImage(arkaplan, 0, ah * ZEMIN / H, aw, ah * (H - ZEMIN) / H, 0, ZEMIN, W, H - ZEMIN);
+
+  // yanıp sönme (dokunulmazlık)
+  if (!(dokunulmaz > 0 && Math.floor(dokunulmaz / 100) % 2 === 0)) {
+    const img = karakterler[secili];
+    const iw = img.naturalWidth, ih = img.naturalHeight;
+    ctx.save();
+    ctx.translate(oyuncu.x + oyuncu.w / 2, oyuncu.y + oyuncu.h / 2);
+    ctx.rotate(Math.max(-0.35, Math.min(0.45, oyuncu.vy * 0.035)));
+    ctx.drawImage(img, iw * KIRP.x, ih * KIRP.y, iw * KIRP.w, ih * KIRP.h,
+                  -oyuncu.w / 2, -oyuncu.h / 2, oyuncu.w, oyuncu.h);
+    ctx.restore();
+  }
+}
+
+function dongu(t) {
+  const dt = Math.min(40, t - sonZaman);
+  sonZaman = t;
+  if (durum !== "oyun") return;
+  guncelle(dt);
+  if (durum === "oyun") { ciz(); anim = requestAnimationFrame(dongu); }
+}
+
+// --- Butonlar ---
+document.getElementById("baslat").onclick      = () => { durum = "secim"; ekranGoster("secim"); };
+document.getElementById("osmanSec").onclick    = () => basla("Osman");
+document.getElementById("renginSec").onclick   = () => basla("Rengin");
+document.getElementById("tekrarOyna").onclick  = () => basla(secili);
+document.getElementById("karakterSec").onclick = () => { durum = "secim"; ekranGoster("secim"); };
+
+// --- Kontroller: tıkla / dokun / boşluk ---
+ekranlar.oyun.addEventListener("pointerdown", e => { e.preventDefault(); ziplat(); });
+window.addEventListener("keydown", e => {
+  if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); ziplat(); }
+});
+
+ekranGoster("giris");
+</script>
+</body>
+</html>
